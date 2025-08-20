@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transformers.js AIチャット</title>
+    <!-- Tailwind CSSを読み込み -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* スクロールバーのスタイル */
+        #chat-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        #chat-container::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+        #chat-container::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 4px;
+        }
+        #chat-container::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans flex items-center justify-center min-h-screen">
+
+    <div class="w-full max-w-2xl mx-auto bg-white rounded-2xl shadow-2xl flex flex-col h-[90vh]">
+        <!-- ヘッダー -->
+        <header class="bg-blue-600 text-white p-4 rounded-t-2xl shadow-md">
+            <h1 class="text-2xl font-bold text-center">AIチャット</h1>
+        </header>
+
+        <!-- チャットコンテナ -->
+        <div id="chat-container" class="flex-1 p-6 overflow-y-auto space-y-4">
+            <!-- メッセージがここに追加されます -->
+        </div>
+
+        <!-- ステータス表示 -->
+        <div id="status" class="p-4 text-center text-gray-500 border-t">
+            モデルを読み込んでいます... 初回は時間がかかることがあります。
+        </div>
+
+        <!-- 入力フォーム -->
+        <form id="chat-form" class="p-4 border-t flex items-center space-x-4">
+            <input 
+                type="text" 
+                id="message-input" 
+                placeholder="メッセージを入力..." 
+                class="flex-1 p-3 border rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
+                autocomplete="off"
+                disabled>
+            <button 
+                type="submit" 
+                id="send-button"
+                class="bg-blue-600 text-white rounded-full p-3 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition disabled:bg-gray-400 disabled:cursor-not-allowed"
+                disabled>
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+            </button>
+        </form>
+    </div>
+
+    <!-- Transformers.jsのスクリプト -->
+    <script type="module">
+        // ES Module Shims (importmapをサポートしないブラウザ用)
+        import 'https://unpkg.com/es-module-shims@1.10.0/dist/es-module-shims.js';
+
+        // importmapでライブラリのURLを定義
+        const importmap = document.createElement('script');
+        importmap.type = 'importmap';
+        importmap.textContent = JSON.stringify({
+            imports: {
+                "@xenova/transformers": "https://unpkg.com/@xenova/transformers@2.17.1/dist/transformers.min.js"
+            }
+        });
+        document.head.appendChild(importmap);
+
+        // Transformers.jsからpipelineをインポート
+        import { pipeline, env } from '@xenova/transformers';
+
+        // WebGPUを無効化 (互換性のため)
+        env.allowLocalModels = false;
+        env.useBrowserCache = false;
+
+        // DOM要素を取得
+        const status = document.getElementById('status');
+        const chatContainer = document.getElementById('chat-container');
+        const messageInput = document.getElementById('message-input');
+        const sendButton = document.getElementById('send-button');
+        const chatForm = document.getElementById('chat-form');
+
+        let chatbot = null;
+
+        // メッセージをチャットに追加する関数
+        function addMessage(text, sender) {
+            const messageDiv = document.createElement('div');
+            const bubbleDiv = document.createElement('div');
+            
+            messageDiv.classList.add('flex');
+            bubbleDiv.classList.add('p-3', 'rounded-2xl', 'max-w-md');
+            bubbleDiv.textContent = text;
+
+            if (sender === 'user') {
+                messageDiv.classList.add('justify-end');
+                bubbleDiv.classList.add('bg-blue-500', 'text-white');
+            } else {
+                messageDiv.classList.add('justify-start');
+                bubbleDiv.classList.add('bg-gray-200', 'text-gray-800');
+            }
+            
+            messageDiv.appendChild(bubbleDiv);
+            chatContainer.appendChild(messageDiv);
+            
+            // 新しいメッセージにスクロール
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        // AIの返信中にタイピングインジケーターを表示する関数
+        function showTypingIndicator() {
+            const typingDiv = document.createElement('div');
+            typingDiv.id = 'typing-indicator';
+            typingDiv.classList.add('flex', 'justify-start', 'items-center', 'space-x-1');
+            
+            const bubbleDiv = document.createElement('div');
+            bubbleDiv.classList.add('p-3', 'rounded-2xl', 'bg-gray-200');
+            
+            for (let i = 0; i < 3; i++) {
+                const dot = document.createElement('span');
+                dot.classList.add('w-2', 'h-2', 'bg-gray-500', 'rounded-full', 'animate-bounce');
+                dot.style.animationDelay = `${i * 0.15}s`;
+                bubbleDiv.appendChild(dot);
+            }
+            
+            typingDiv.appendChild(bubbleDiv);
+            chatContainer.appendChild(typingDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        // タイピングインジケーターを削除する関数
+        function removeTypingIndicator() {
+            const indicator = document.getElementById('typing-indicator');
+            if (indicator) {
+                indicator.remove();
+            }
+        }
+
+        // メイン処理
+        async function main() {
+            try {
+                // 会話モデルをロード
+                // 'Xenova/DialoGPT-medium'は中規模の対話モデルです
+                status.textContent = 'AIモデルを読み込んでいます...';
+                chatbot = await pipeline('conversational', 'Xenova/DialoGPT-medium', {
+                    progress_callback: (progress) => {
+                        const percentage = (progress.progress).toFixed(1);
+                        status.textContent = `${progress.file} (${percentage}%) をダウンロード中...`;
+                    }
+                });
+
+                // ロード完了後の処理
+                status.textContent = '準備完了！メッセージをどうぞ。';
+                messageInput.disabled = false;
+                sendButton.disabled = false;
+                addMessage('こんにちは！何かお話ししませんか？', 'bot');
+
+            } catch (error) {
+                console.error('モデルの読み込みに失敗しました:', error);
+                status.textContent = 'エラー: モデルの読み込みに失敗しました。';
+            }
+        }
+
+        // フォーム送信時のイベントリスナー
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const message = messageInput.value.trim();
+            if (!message || !chatbot) return;
+
+            // ユーザーメッセージを表示
+            addMessage(message, 'user');
+            messageInput.value = '';
+            messageInput.disabled = true;
+            sendButton.disabled = true;
+            
+            // AIの返信を待つ
+            showTypingIndicator();
+
+            try {
+                // AIにメッセージを送信し、返信を取得
+                const response = await chatbot(message);
+                
+                // 応答から最後の返信テキストを取得
+                const reply = response.generated_responses[response.generated_responses.length - 1];
+                
+                removeTypingIndicator();
+                addMessage(reply, 'bot');
+
+            } catch (error) {
+                console.error('チャットの処理中にエラーが発生しました:', error);
+                removeTypingIndicator();
+                addMessage('申し訳ありません、エラーが発生しました。', 'bot');
+            } finally {
+                messageInput.disabled = false;
+                sendButton.disabled = false;
+                messageInput.focus();
+            }
+        });
+
+        // 処理開始
+        main();
+    </script>
+</body>
+</html>
